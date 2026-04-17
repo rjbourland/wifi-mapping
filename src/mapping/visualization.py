@@ -141,6 +141,135 @@ class Visualizer:
 
         return fig
 
+    def plot_heatmap_plotly(
+        self,
+        positions: np.ndarray,
+        z_slice: Optional[float] = None,
+        resolution: float = 0.1,
+        title: str = "Position Density Heatmap",
+        dark_theme: bool = True,
+    ):
+        """Plot a 2D position density heatmap using Plotly.
+
+        Args:
+            positions: (N, 3) array of positions.
+            z_slice: If specified, only include positions near this z-height.
+            resolution: Grid resolution in meters.
+            title: Plot title.
+            dark_theme: Apply dark theme matching dashboard.
+
+        Returns:
+            plotly Figure object.
+        """
+        import plotly.graph_objects as go
+
+        if z_slice is not None:
+            mask = np.abs(positions[:, 2] - z_slice) < resolution * 2
+            xy = positions[mask, :2]
+        else:
+            xy = positions[:, :2]
+
+        if len(xy) == 0:
+            logger.warning("No positions to plot in heatmap")
+            return None
+
+        rx = self.room.get("length_x", 10)
+        ry = self.room.get("width_y", 10)
+
+        heatmap, xedges, yedges = np.histogram2d(
+            xy[:, 0], xy[:, 1],
+            bins=[np.arange(0, rx + resolution, resolution),
+                  np.arange(0, ry + resolution, resolution)],
+        )
+
+        fig = go.Figure(go.Heatmap(
+            x=xedges[:-1], y=yedges[:-1], z=heatmap.T,
+            colorscale="Hot", colorbar=dict(title="Count"),
+            hovertemplate="X: %{x:.1f}m  Y: %{y:.1f}m<br>Count: %{z}<extra></extra>",
+        ))
+
+        layout_kwargs = dict(
+            title=title,
+            xaxis_title="X (m)", yaxis_title="Y (m)",
+            yaxis_scaleanchor="x", yaxis_scaleratio=1,
+        )
+        if dark_theme:
+            layout_kwargs.update(
+                plot_bgcolor="#0e1117", paper_bgcolor="#0e1117",
+                font=dict(color="#e0e0e0"),
+                xaxis_gridcolor="#1a1a2e", yaxis_gridcolor="#1a1a2e",
+            )
+        fig.update_layout(**layout_kwargs)
+
+        return fig
+
+    def plot_occupancy_slice(
+        self,
+        grid: "OccupancyGrid",
+        z_slice: float = 0.0,
+        method: str = "matplotlib",
+        title: str = "Occupancy Grid",
+    ):
+        """Render a 2D z-slice of an OccupancyGrid.
+
+        Args:
+            grid: OccupancyGrid instance (must be initialized).
+            z_slice: Height of the z-slice to visualize.
+            method: 'matplotlib' or 'plotly'.
+            title: Plot title.
+
+        Returns:
+            Figure object (matplotlib or plotly).
+        """
+        from .occupancy_grid import OccupancyGrid
+
+        prob = grid.probability_grid
+        if prob.size == 0:
+            logger.warning("Occupancy grid is empty — call initialize() first")
+            return None
+
+        # Find z-index closest to z_slice
+        z_idx = int((z_slice - grid._origin[2]) / grid.voxel_size)
+        z_idx = max(0, min(z_idx, prob.shape[2] - 1))
+
+        slice_2d = prob[:, :, z_idx].T  # Transpose for x-y orientation
+
+        if method == "matplotlib":
+            fig, ax = plt.subplots(figsize=(10, 8))
+            im = ax.imshow(slice_2d, origin="lower", cmap="RdYlGn",
+                           vmin=0, vmax=1, aspect="auto",
+                           extent=[grid._origin[0],
+                                   grid._origin[0] + prob.shape[0] * grid.voxel_size,
+                                   grid._origin[1],
+                                   grid._origin[1] + prob.shape[1] * grid.voxel_size])
+            plt.colorbar(im, ax=ax, label="Occupancy Probability")
+            ax.set_xlabel("X (m)")
+            ax.set_ylabel("Y (m)")
+            ax.set_title(f"{title} (z = {z_slice:.1f}m)")
+            return fig
+
+        elif method == "plotly":
+            import plotly.graph_objects as go
+
+            x = np.arange(prob.shape[0]) * grid.voxel_size + grid._origin[0]
+            y = np.arange(prob.shape[1]) * grid.voxel_size + grid._origin[1]
+
+            fig = go.Figure(go.Heatmap(
+                x=x, y=y, z=slice_2d,
+                colorscale="RdYlGn", zmin=0, zmax=1,
+                colorbar=dict(title="Occupancy"),
+                hovertemplate="X: %{x:.2f}m  Y: %{y:.2f}m<br>Prob: %{z:.2f}<extra></extra>",
+            ))
+            fig.update_layout(
+                title=f"{title} (z = {z_slice:.1f}m)",
+                xaxis_title="X (m)", yaxis_title="Y (m)",
+                yaxis_scaleanchor="x", yaxis_scaleratio=1,
+            )
+            return fig
+
+        else:
+            raise ValueError(f"Unknown method: {method!r}. Use 'matplotlib' or 'plotly'.")
+
     def show_open3d(self, points: np.ndarray):
         """Display point cloud using Open3D (if available).
 
