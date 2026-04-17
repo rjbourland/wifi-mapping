@@ -1,0 +1,50 @@
+# Data collection parameters
+
+collection:
+  # Sampling rate (Hz) — how often to capture CSI/RSSI samples
+  sample_rate: 50
+
+  # Duration per capture session (seconds)
+  duration: 60
+
+  # Number of packets per sample (for averaging)
+  packets_per_sample: 10
+
+  # Output format: parquet, csv, or both
+  output_format: parquet
+
+  # Data directory
+  data_dir: "./data/raw"
+
+  # Ground truth file
+  ground_truth_file: "./data/ground_truth.csv"
+
+# ESP32-specific settings
+esp32:
+  # Serial port (auto-detect if empty)
+  serial_port: ""
+  baud_rate: 921600
+  # CSI configuration
+  channel: 6
+  bandwidth: 20  # MHz — ESP32 only supports 20
+  # Output mode: raw_csi, amplitude_phase, or both
+  output_mode: both
+
+# FeitCSI / AX210-specific settings
+ax210:
+  # Network interface
+  interface: "wlan0"
+  channel: 36
+  bandwidth: 80  # MHz
+  # Number of CSI packets to capture per sample
+  num_packets: 100
+  # Output format
+  output_format: pcap  # pcap or binary
+
+# Nexmon / Raspberry Pi settings
+nexmon:
+  interface: "wlan0"
+  channel: 36
+  bandwidth: 80  # MHz
+  # PCAP capture parameters
+  capture_interface: "mon0"

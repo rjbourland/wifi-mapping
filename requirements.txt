@@ -1,0 +1,9 @@
+numpy>=1.24
+pandas>=2.0
+pyyaml>=6.0
+pyarrow>=12.0
+pyserial>=3.5
+scipy>=1.10
+matplotlib>=3.7
+plotly>=5.15
+streamlit>=1.30

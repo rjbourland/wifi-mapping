@@ -1,0 +1,79 @@
+# Algorithm hyperparameters
+
+# RSSI path-loss model
+path_loss:
+  # Reference distance (meters)
+  d0: 1.0
+  # Path-loss exponent (2.0 = free space, 2.7-3.5 = indoor)
+  n: 3.0
+  # Reference RSSI at d0 (dBm) — measured from calibration
+  rssi_d0: -30.0
+  # Standard deviation of shadow fading (dB)
+  sigma: 4.0
+
+# Trilateration
+trilateration:
+  # Least-squares solver: lm (Levenberg-Marquardt) or trf (Trust Region Reflective)
+  solver: lm
+  # Initial guess method: centroid or measured
+  initial_guess: centroid
+
+# k-NN Fingerprinting
+fingerprinting:
+  # Number of nearest neighbors
+  k: 5
+  # Distance metric: euclidean, manhattan, or cosine
+  distance_metric: euclidean
+  # Feature type: rssi, csi_amplitude, csi_phase, or combined
+  feature_type: rssi
+  # Whether to weight by inverse distance
+  weighted: true
+
+# MUSIC AoA Estimation
+music:
+  # Number of antennas (per AP)
+  num_antennas: 2
+  # Number of multipath components to resolve
+  num_paths: 4
+  # Angle search resolution (degrees)
+  angle_resolution: 1.0
+  # Subcarrier selection: all, data_only, or pilot_only
+  subcarrier_selection: data_only
+
+# Kalman Filter (tracking)
+kalman:
+  # State noise covariance
+  process_noise: 0.1
+  # Measurement noise covariance
+  measurement_noise: 1.0
+  # Initial state uncertainty
+  initial_uncertainty: 10.0
+
+# Motion detection
+motion_detection:
+  # Variance threshold (amplitude units^2)
+  variance_threshold: 0.5
+  # Window size (samples)
+  window_size: 20
+  # Minimum duration for motion event (seconds)
+  min_duration: 0.5
+
+# Breathing detection
+breathing_detection:
+  # Expected breathing rate range (breaths per minute)
+  bpm_min: 10
+  bpm_max: 30
+  # FFT parameters
+  fft_window: 1024
+  # Minimum signal-to-noise ratio
+  snr_threshold: 3.0
+
+# 3D Mapping
+mapping:
+  # Voxel size (meters)
+  voxel_size: 0.1
+  # Occupancy grid: probability thresholds
+  occupied_threshold: 0.7
+  free_threshold: 0.3
+  # Point cloud downsampling
+  downsample_voxel_size: 0.05

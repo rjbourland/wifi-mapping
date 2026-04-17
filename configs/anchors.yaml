@@ -1,0 +1,49 @@
+# Anchor node positions and configuration
+# Define each anchor's 3D position in the room's coordinate system
+# Origin: lower-left corner of room, x along long wall, y along short wall, z up
+
+anchors:
+  anchor_1:
+    position: [0.0, 0.0, 2.5]    # Ceiling corner (x, y, z) in meters
+    height: ceiling               # ceiling, mid, or floor
+    hardware: esp32_s3            # esp32_s3, ax210, nexmon_pi
+    ip: "192.168.1.101"
+    channel: 6                    # WiFi channel
+    bandwidth: 20                 # MHz
+
+  anchor_2:
+    position: [4.0, 0.0, 1.3]    # Mid-height on opposite wall
+    height: mid
+    hardware: esp32_s3
+    ip: "192.168.1.102"
+    channel: 6
+    bandwidth: 20
+
+  anchor_3:
+    position: [4.0, 4.0, 0.3]    # Floor level
+    height: floor
+    hardware: esp32_s3
+    ip: "192.168.1.103"
+    channel: 6
+    bandwidth: 20
+
+  anchor_4:
+    position: [0.0, 4.0, 2.5]    # Ceiling opposite corner
+    height: ceiling
+    hardware: esp32_s3
+    ip: "192.168.1.104"
+    channel: 6
+    bandwidth: 20
+
+# Room dimensions (meters)
+room:
+  length_x: 4.0
+  width_y: 4.0
+  height_z: 2.5
+
+# Coordinate system origin
+origin:
+  description: "Lower-left corner of room, floor level"
+  x_axis: "along long wall"
+  y_axis: "along short wall"
+  z_axis: "upward"
