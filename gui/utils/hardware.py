@@ -5,6 +5,8 @@ handling platform differences and permission errors gracefully.
 """
 
 import logging
+import os
+import sys
 from typing import Optional
 
 from src.collection.rssi_scanner import RSSIScanner, NetworkResult
@@ -25,6 +27,38 @@ class HardwareManager:
         self.pipeline = RSSIPipeline(window_size=5, min_seen=3)
         self._active = False
 
+    @staticmethod
+    def check_scan_permissions() -> tuple[bool, str]:
+        """Check if the current process has permissions for RSSI scanning.
+
+        On Linux, WiFi scanning requires CAP_NET_RAW or root.
+        On Windows/macOS, scanning uses different mechanisms.
+
+        Returns:
+            Tuple of (has_permissions, message).
+        """
+        if sys.platform == "win32" or sys.platform == "darwin":
+            # Windows/macOS WiFi scanning doesn't need special capabilities
+            return True, "WiFi scanning available on this platform"
+
+        # Linux: check for CAP_NET_RAW on the Python binary
+        python_bin = sys.executable
+        try:
+            caps = os.popen(f"getcap '{python_bin}' 2>/dev/null").read().strip()
+            if "cap_net_raw" in caps:
+                return True, f"CAP_NET_RAW granted: {caps}"
+        except Exception:
+            pass
+
+        # Check if running as root
+        if os.geteuid() == 0:
+            return True, "Running as root — WiFi scanning available"
+
+        return False, (
+            "WiFi scanning requires CAP_NET_RAW or root. Fix:\n"
+            f"  sudo setcap cap_net_raw+ep {python_bin}"
+        )
+
     def start_rssi(self, interface: str = "") -> bool:
         """Start RSSI scanning on the given interface.
 
@@ -35,6 +69,11 @@ class HardwareManager:
         Returns:
             True if scanner started successfully, False otherwise.
         """
+        has_perm, msg = self.check_scan_permissions()
+        if not has_perm:
+            logger.error("Insufficient permissions: %s", msg)
+            return False
+
         try:
             self.rssi_scanner = RSSIScanner(interface=interface)
             self._active = True

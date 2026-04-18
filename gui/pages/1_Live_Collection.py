@@ -11,7 +11,7 @@ import streamlit as st
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from gui.utils.theme import inject_theme, section_header, status_badge
 from gui.utils.data_loader import (
@@ -54,6 +54,10 @@ with col_conn2:
     elif source == "Live RSSI Scan":
         iface = st.text_input("Interface (blank=auto)", value="", key="coll_iface")
         st.markdown(status_badge("LIVE MODE", "warning"), unsafe_allow_html=True)
+        # Check permissions and warn if insufficient
+        has_perm, perm_msg = HardwareManager.check_scan_permissions()
+        if not has_perm:
+            st.warning(f"⚠ Permission check failed: {perm_msg}")
     else:
         st.markdown(status_badge("SIMULATION", "warning"), unsafe_allow_html=True)
 
@@ -68,7 +72,8 @@ with col_conn3:
                     st.session_state.hardware_manager = hw
                     st.toast("Live RSSI scanner started")
                 else:
-                    st.error("Failed to start RSSI scanner. Check permissions.")
+                    _, perm_detail = HardwareManager.check_scan_permissions()
+                    st.error(f"Failed to start RSSI scanner. {perm_detail}")
             else:
                 st.toast("Collection started")
     with col_btn2:
@@ -82,76 +87,90 @@ with col_conn3:
         if st.button("📊 Generate Sample Data", use_container_width=True):
             _generate_sample_data()
 
-# --- RSSI Time Series ---
-section_header("RSSI Time Series", "📈")
+# --- Auto-refresh for live data ---
+_refresh_seconds = st.selectbox(
+    "Auto-refresh (seconds)", [2, 5, 10, 30], index=1, key="coll_refresh"
+) if st.session_state.collection_active and source in (
+    "Live RSSI Scan", "ESP32 Serial", "AX210 UDP"
+) else None
 
-if st.session_state.rssi_history:
-    rssi_df = rssi_history_to_dataframe(st.session_state.rssi_history)
 
-    fig_rssi = go.Figure()
-    for anchor_id in rssi_df["anchor_id"].unique():
-        anchor_data = rssi_df[rssi_df["anchor_id"] == anchor_id]
-        fig_rssi.add_trace(go.Scatter(
-            x=anchor_data["timestamp"],
-            y=anchor_data["rssi"],
-            mode="lines+markers",
-            name=anchor_id,
-            line=dict(width=2),
-        ))
+@st.fragment(run_every=timedelta(seconds=5) if st.session_state.get("collection_active") else None)
+def _live_data_fragment():
+    """Auto-refreshing fragment for live data collection.
 
-    fig_rssi.update_layout(
-        xaxis_title="Time", yaxis_title="RSSI (dBm)",
-        plot_bgcolor="#0e1117", paper_bgcolor="#0e1117",
-        font=dict(color="#e0e0e0", family="Fira Code"),
-        height=350,
-        legend=dict(font=dict(color="#888", size=9)),
-        margin=dict(l=50, r=20, t=20, b=40),
-    )
-    st.plotly_chart(fig_rssi, use_container_width=True)
-else:
-    st.info("No RSSI data collected yet. Start collection or generate sample data.")
+    When collection is active in live mode, this fragment re-runs every
+    5 seconds to poll for new data and update the RSSI chart.
+    """
+    # --- Live RSSI Processing ---
+    if st.session_state.collection_active and st.session_state.get("hardware_manager"):
+        hw = st.session_state.hardware_manager
+        if hw and hw.is_active:
+            scans = hw.scan_and_process()
+            if scans:
+                anchors = st.session_state.anchors
+                anchor_ids = {a.anchor_id for a in anchors}
+                anchor_ips = {a.ip for a in anchors if a.ip}
+                matching = [s for s in scans if s.bssid in anchor_ids or s.bssid in anchor_ips]
 
-# --- Live RSSI Processing ---
-if source == "Live RSSI Scan" and st.session_state.collection_active:
-    hw = st.session_state.get("hardware_manager")
-    if hw and hw.is_active:
-        scans = hw.scan_and_process()
-        if scans:
-            # Process through localization if we have enough scans
-            anchors = st.session_state.anchors
-            anchor_ids = {a.anchor_id for a in anchors}
-            anchor_ips = {a.ip for a in anchors if a.ip}
-            matching = [s for s in scans if s.bssid in anchor_ids or s.bssid in anchor_ips]
+                if len(matching) >= 3:
+                    solver = st.session_state.trilateration_solver
+                    try:
+                        position = solver.localize_from_scans(matching, anchors)
+                        result = LocalizedPosition(
+                            timestamp=position.timestamp,
+                            position=np.array([position.x, position.y, 0.0]),
+                            method="trilateration",
+                            anchors_used=[s.bssid for s in matching],
+                        )
+                        kalman = st.session_state.kalman_filter
+                        smoothed = kalman.update_position(position)
+                        result.position = np.array([smoothed.x, smoothed.y, 0.0])
 
-            if len(matching) >= 3:
-                solver = st.session_state.trilateration_solver
-                try:
-                    position = solver.localize_from_scans(matching, anchors)
-                    result = LocalizedPosition(
-                        timestamp=position.timestamp,
-                        position=np.array([position.x, position.y, 0.0]),
-                        method="trilateration",
-                        anchors_used=[s.bssid for s in matching],
-                    )
-                    kalman = st.session_state.kalman_filter
-                    smoothed = kalman.update_position(position)
-                    result.position = np.array([smoothed.x, smoothed.y, 0.0])
+                        st.session_state.localized_positions.append(result)
+                        st.session_state.last_position = result.position
+                        st.session_state.last_method = "trilateration"
+                        st.session_state.position_trail_2d.append((smoothed.x, smoothed.y))
+                    except ValueError as e:
+                        st.warning(f"Localization failed: {e}")
 
-                    st.session_state.localized_positions.append(result)
-                    st.session_state.last_position = result.position
-                    st.session_state.last_method = "trilateration"
-                    st.session_state.position_trail_2d.append((smoothed.x, smoothed.y))
-                except ValueError as e:
-                    st.warning(f"Localization failed: {e}")
+                rssi = rssi_dict_from_scans(scans)
+                for bssid, rssi_val in rssi.items():
+                    st.session_state.rssi_history.append({
+                        "timestamp": datetime.now().isoformat(),
+                        "anchor_id": bssid,
+                        "rssi": rssi_val,
+                    })
 
-            # Add to RSSI history
-            rssi = rssi_dict_from_scans(scans)
-            for bssid, rssi_val in rssi.items():
-                st.session_state.rssi_history.append({
-                    "timestamp": datetime.now().isoformat(),
-                    "anchor_id": bssid,
-                    "rssi": rssi_val,
-                })
+    # --- RSSI Time Series ---
+    if st.session_state.rssi_history:
+        rssi_df = rssi_history_to_dataframe(st.session_state.rssi_history)
+
+        fig_rssi = go.Figure()
+        for anchor_id in rssi_df["anchor_id"].unique():
+            anchor_data = rssi_df[rssi_df["anchor_id"] == anchor_id]
+            fig_rssi.add_trace(go.Scatter(
+                x=anchor_data["timestamp"],
+                y=anchor_data["rssi"],
+                mode="lines+markers",
+                name=anchor_id,
+                line=dict(width=2),
+            ))
+
+        fig_rssi.update_layout(
+            xaxis_title="Time", yaxis_title="RSSI (dBm)",
+            plot_bgcolor="#0e1117", paper_bgcolor="#0e1117",
+            font=dict(color="#e0e0e0", family="Fira Code"),
+            height=350,
+            legend=dict(font=dict(color="#888", size=9)),
+            margin=dict(l=50, r=20, t=20, b=40),
+        )
+        st.plotly_chart(fig_rssi, use_container_width=True)
+    else:
+        st.info("No RSSI data collected yet. Start collection or generate sample data.")
+
+
+_live_data_fragment()
 
 # --- CSI Amplitude Heatmap ---
 section_header("CSI Amplitude Heatmap", "🌡")

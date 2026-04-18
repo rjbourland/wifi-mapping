@@ -15,7 +15,7 @@ echo "Project: ${PROJECT_DIR}"
 echo "Install: ${INSTALL_DIR}"
 
 # 1. System packages
-echo "[1/6] Installing system packages..."
+echo "[1/7] Installing system packages..."
 sudo apt-get update -qq
 sudo apt-get install -y -qq \
     python3-pip python3-venv \
@@ -25,12 +25,12 @@ sudo apt-get install -y -qq \
     || true
 
 # 2. Create install directory
-echo "[2/6] Setting up install directory..."
+echo "[2/7] Setting up install directory..."
 sudo mkdir -p "${INSTALL_DIR}"
 sudo cp -r "${PROJECT_DIR}"/* "${INSTALL_DIR}/"
 
 # 3. Python venv + dependencies
-echo "[3/6] Creating Python virtual environment..."
+echo "[3/7] Creating Python virtual environment..."
 python3 -m venv "${VENV_DIR}"
 "${VENV_DIR}/bin/pip" install --upgrade pip --quiet
 "${VENV_DIR}/bin/pip" install -r "${INSTALL_DIR}/requirements.txt" --quiet
@@ -39,7 +39,7 @@ python3 -m venv "${VENV_DIR}"
 "${VENV_DIR}/bin/pip" install streamlit plotly --quiet
 
 # 4. Monitor mode setup (for Nexmon-patched Pi)
-echo "[4/6] Configuring monitor interface..."
+echo "[4/7] Configuring monitor interface..."
 read -p "Set up monitor mode interface? (y/N): " setup_mon
 if [[ "${setup_mon}" =~ ^[Yy]$ ]]; then
     read -p "WiFi interface (default: wlan0): " wifi_iface
@@ -52,15 +52,28 @@ if [[ "${setup_mon}" =~ ^[Yy]$ ]]; then
     echo "Monitor interface mon0 created on ${wifi_iface}"
 fi
 
-# 5. Systemd service
-echo "[5/6] Installing systemd service..."
+# 5. RSSI scan permissions
+echo "[5/7] Setting up RSSI scan permissions..."
+# Grant CAP_NET_RAW to the Python binary so wifi scanning works without sudo
+PYTHON_BIN="${VENV_DIR}/bin/python3"
+if [[ -f "${PYTHON_BIN}" ]]; then
+    sudo setcap cap_net_raw+ep "${PYTHON_BIN}"
+    echo "CAP_NET_RAW granted to ${PYTHON_BIN}"
+else
+    echo "WARNING: Python binary not found at ${PYTHON_BIN}"
+    echo "RSSI scanning will require sudo. Run manually:"
+    echo "  sudo setcap cap_net_raw+ep \$(which python3)"
+fi
+
+# 6. Systemd service
+echo "[6/7] Installing systemd service..."
 sudo cp "${INSTALL_DIR}/deploy/wifi-mapping.service" /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable wifi-mapping.service
 echo "Service installed. Start with: sudo systemctl start wifi-mapping"
 
-# 6. Pi-specific config overlay
-echo "[6/6] Applying Pi config overlay..."
+# 7. Pi-specific config overlay
+echo "[7/7] Applying Pi config overlay..."
 if [[ -f "${INSTALL_DIR}/deploy/pi_config.yaml" ]]; then
     mkdir -p "${INSTALL_DIR}/configs"
     cp "${INSTALL_DIR}/deploy/pi_config.yaml" "${INSTALL_DIR}/configs/pi.yaml"
