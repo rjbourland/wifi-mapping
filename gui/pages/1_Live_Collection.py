@@ -20,6 +20,10 @@ from gui.utils.data_loader import (
     generate_synthetic_csi,
     rssi_history_to_dataframe,
 )
+from gui.utils.hardware import HardwareManager
+from gui.utils.pipeline import generate_synthetic_scans, rssi_dict_from_scans
+from src.localization.trilateration import TrilaterationSolver
+from src.utils.data_formats import LocalizedPosition
 
 st.set_page_config(page_title="Live Collection", page_icon="📡", layout="wide")
 inject_theme()
@@ -39,7 +43,7 @@ section_header("Connection", "🔌")
 col_conn1, col_conn2, col_conn3 = st.columns([1, 1, 2])
 
 with col_conn1:
-    source = st.selectbox("Data Source", ["Simulation", "ESP32 Serial", "AX210 UDP"], key="coll_source")
+    source = st.selectbox("Data Source", ["Simulation", "ESP32 Serial", "AX210 UDP", "Live RSSI Scan"], key="coll_source")
 
 with col_conn2:
     if source == "ESP32 Serial":
@@ -47,6 +51,9 @@ with col_conn2:
         baud = st.number_input("Baud Rate", value=921600, key="coll_baud")
     elif source == "AX210 UDP":
         udp_port = st.number_input("UDP Port", value=5500, key="coll_udp")
+    elif source == "Live RSSI Scan":
+        iface = st.text_input("Interface (blank=auto)", value="", key="coll_iface")
+        st.markdown(status_badge("LIVE MODE", "warning"), unsafe_allow_html=True)
     else:
         st.markdown(status_badge("SIMULATION", "warning"), unsafe_allow_html=True)
 
@@ -55,10 +62,21 @@ with col_conn3:
     with col_btn1:
         if st.button("▶ Start Collection", type="primary", use_container_width=True):
             st.session_state.collection_active = True
-            st.toast("Collection started")
+            if source == "Live RSSI Scan":
+                hw = st.session_state.get("hardware_manager") or HardwareManager()
+                if hw.start_rssi(iface if source == "Live RSSI Scan" else ""):
+                    st.session_state.hardware_manager = hw
+                    st.toast("Live RSSI scanner started")
+                else:
+                    st.error("Failed to start RSSI scanner. Check permissions.")
+            else:
+                st.toast("Collection started")
     with col_btn2:
         if st.button("⏹ Stop", use_container_width=True):
             st.session_state.collection_active = False
+            hw = st.session_state.get("hardware_manager")
+            if hw:
+                hw.stop()
             st.toast("Collection stopped")
     with col_btn3:
         if st.button("📊 Generate Sample Data", use_container_width=True):
@@ -92,6 +110,48 @@ if st.session_state.rssi_history:
     st.plotly_chart(fig_rssi, use_container_width=True)
 else:
     st.info("No RSSI data collected yet. Start collection or generate sample data.")
+
+# --- Live RSSI Processing ---
+if source == "Live RSSI Scan" and st.session_state.collection_active:
+    hw = st.session_state.get("hardware_manager")
+    if hw and hw.is_active:
+        scans = hw.scan_and_process()
+        if scans:
+            # Process through localization if we have enough scans
+            anchors = st.session_state.anchors
+            anchor_ids = {a.anchor_id for a in anchors}
+            anchor_ips = {a.ip for a in anchors if a.ip}
+            matching = [s for s in scans if s.bssid in anchor_ids or s.bssid in anchor_ips]
+
+            if len(matching) >= 3:
+                solver = st.session_state.trilateration_solver
+                try:
+                    position = solver.localize_from_scans(matching, anchors)
+                    result = LocalizedPosition(
+                        timestamp=position.timestamp,
+                        position=np.array([position.x, position.y, 0.0]),
+                        method="trilateration",
+                        anchors_used=[s.bssid for s in matching],
+                    )
+                    kalman = st.session_state.kalman_filter
+                    smoothed = kalman.update_position(position)
+                    result.position = np.array([smoothed.x, smoothed.y, 0.0])
+
+                    st.session_state.localized_positions.append(result)
+                    st.session_state.last_position = result.position
+                    st.session_state.last_method = "trilateration"
+                    st.session_state.position_trail_2d.append((smoothed.x, smoothed.y))
+                except ValueError as e:
+                    st.warning(f"Localization failed: {e}")
+
+            # Add to RSSI history
+            rssi = rssi_dict_from_scans(scans)
+            for bssid, rssi_val in rssi.items():
+                st.session_state.rssi_history.append({
+                    "timestamp": datetime.now().isoformat(),
+                    "anchor_id": bssid,
+                    "rssi": rssi_val,
+                })
 
 # --- CSI Amplitude Heatmap ---
 section_header("CSI Amplitude Heatmap", "🌡")
@@ -150,8 +210,9 @@ def _generate_sample_data():
     """Generate sample RSSI and CSI data for testing the collection view."""
     anchors = st.session_state.anchors
     room = st.session_state.room_dimensions
+    pipeline = st.session_state.rssi_pipeline
 
-    # Simulate RSSI from a point moving along a path
+    # Use real pipeline for generation
     for i in range(30):
         t = i / 30.0
         pos = np.array([
@@ -159,11 +220,14 @@ def _generate_sample_data():
             room["width_y"] * (0.3 + 0.4 * np.sin(2 * np.pi * t)),
             1.0 + 0.5 * np.sin(4 * np.pi * t),
         ])
-        rssi = generate_synthetic_rssi(anchors, pos, noise_std=3.0)
-        for aid, val in rssi.items():
+
+        scans = generate_synthetic_scans(anchors, pos, pipeline, noise_std=3.0)
+        rssi = rssi_dict_from_scans(scans) if scans else generate_synthetic_rssi(anchors, pos, noise_std=3.0)
+
+        for bssid, val in rssi.items():
             st.session_state.rssi_history.append({
                 "timestamp": datetime.now().isoformat(),
-                "anchor_id": aid,
+                "anchor_id": bssid,
                 "rssi": val,
             })
 

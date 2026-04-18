@@ -1,0 +1,15 @@
+[Unit]
+Description=WiFi Mapping Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/opt/wifi-mapping
+ExecStart=/opt/wifi-mapping/venv/bin/streamlit run gui/app.py --server.port 8501 --server.address 0.0.0.0 --server.headless true
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONPATH=/opt/wifi-mapping
+
+[Install]
+WantedBy=multi-user.target

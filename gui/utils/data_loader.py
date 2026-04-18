@@ -18,6 +18,7 @@ from src.utils.data_formats import AnchorPosition
 from src.localization.trilateration import TrilaterationSolver
 from src.localization.fingerprinting import KNNFingerprinting
 from src.localization.kalman_filter import KalmanFilter
+from src.processing.process_rssi import RSSIPipeline
 from src.mapping.point_cloud import PointCloudAccumulator
 from src.detection.motion_detector import MotionDetector
 from src.detection.breathing_detector import BreathingDetector
@@ -44,6 +45,9 @@ def init_session_state():
         "csi_samples": [],
         "collection_active": False,
         "simulation_mode": True,
+        "rssi_pipeline": RSSIPipeline(window_size=5, min_seen=3, spike_threshold_dbm=15),
+        "rssi_scanner": None,  # Lazy-initialized on first live scan
+        "position_trail_2d": [],  # List of (x, y) tuples from Position/SmoothedPosition
         "last_position": None,
         "last_method": "none",
     }

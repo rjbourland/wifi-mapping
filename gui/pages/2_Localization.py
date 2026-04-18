@@ -16,10 +16,12 @@ from gui.utils.theme import inject_theme, section_header
 from gui.utils.data_loader import (
     init_session_state,
     generate_synthetic_rssi,
-    generate_synthetic_csi,
     positions_to_dataframe,
     rssi_history_to_dataframe,
 )
+from gui.utils.pipeline import collect_rssi, run_localization, generate_synthetic_scans, rssi_dict_from_scans
+from src.utils.data_formats import LocalizedPosition
+from src.mapping.adapters import to_xyz
 
 st.set_page_config(page_title="Localization", page_icon="📍", layout="wide")
 inject_theme()
@@ -47,8 +49,12 @@ with col_ctrl2:
 with col_ctrl3:
     col_btn1, col_btn2, col_btn3 = st.columns(3)
     with col_btn1:
-        if st.button("▶ Simulate Single Estimate", use_container_width=True):
-            _run_single_estimate()
+        if st.session_state.simulation_mode:
+            if st.button("▶ Simulate Single Estimate", use_container_width=True):
+                _run_single_estimate()
+        else:
+            if st.button("📡 Live Scan", use_container_width=True):
+                _run_single_estimate()
     with col_btn2:
         if st.button("▶▶ Simulate Path (20 pts)", use_container_width=True):
             _run_path_simulation()
@@ -56,7 +62,9 @@ with col_ctrl3:
         if st.button("🗑 Clear", use_container_width=True):
             st.session_state.localized_positions = []
             st.session_state.rssi_history = []
+            st.session_state.position_trail_2d = []
             st.session_state.last_position = None
+            st.session_state.last_method = "none"
             st.rerun()
 
 # --- Floor Plan ---
@@ -108,8 +116,17 @@ for anchor in anchors:
         name=anchor.anchor_id,
     ))
 
-# Trajectory
-if st.session_state.localized_positions:
+# Trajectory — prefer 2D trail for accuracy, fall back to 3D positions
+if st.session_state.position_trail_2d:
+    trail = np.array(st.session_state.position_trail_2d)
+    fig.add_trace(go.Scatter(
+        x=trail[:, 0], y=trail[:, 1],
+        mode="lines+markers",
+        line=dict(color="#6c63ff", width=2),
+        marker=dict(size=4, color="#6c63ff"),
+        name="Trajectory",
+    ))
+elif st.session_state.localized_positions:
     positions = np.array([p.position for p in st.session_state.localized_positions])
     fig.add_trace(go.Scatter(
         x=positions[:, 0], y=positions[:, 1],
@@ -188,41 +205,124 @@ with col_det2:
 
 
 def _run_single_estimate():
-    room = st.session_state.room_dimensions
+    """Run a single localization estimate using the real pipeline."""
     solver = st.session_state.trilateration_solver
     solver.n = path_loss_n
     anchors = st.session_state.anchors
 
-    # Random position in room
-    true_pos = np.array([
-        np.random.uniform(0.5, room["length_x"] - 0.5),
-        np.random.uniform(0.5, room["width_y"] - 0.5),
-        np.random.uniform(0.3, room["height_z"] - 0.3),
-    ])
+    if st.session_state.simulation_mode:
+        # Generate synthetic scans through the real pipeline
+        room = st.session_state.room_dimensions
+        true_pos = np.array([
+            np.random.uniform(0.5, room["length_x"] - 0.5),
+            np.random.uniform(0.5, room["width_y"] - 0.5),
+            np.random.uniform(0.3, room["height_z"] - 0.3),
+        ])
+        scans = generate_synthetic_scans(
+            anchors, true_pos, st.session_state.rssi_pipeline,
+            noise_std=noise_level, n=path_loss_n,
+        )
 
-    rssi = generate_synthetic_rssi(anchors, true_pos, noise_std=noise_level, n=path_loss_n)
+        # Fallback: if pipeline didn't produce enough scans, use legacy API
+        if len(scans) < 3:
+            rssi = generate_synthetic_rssi(anchors, true_pos, noise_std=noise_level, n=path_loss_n)
+            result = solver.localize(rssi)
+            if use_kalman:
+                result.position = st.session_state.kalman_filter.update(result.position)
+            st.session_state.localized_positions.append(result)
+            st.session_state.last_position = result.position
+            st.session_state.last_method = method
+            st.session_state.position_trail_2d.append((result.position[0], result.position[1]))
 
-    result = solver.localize(rssi)
-    if use_kalman:
-        result.position = st.session_state.kalman_filter.update(result.position)
+            for aid, val in rssi.items():
+                st.session_state.rssi_history.append({
+                    "timestamp": datetime.now().isoformat(),
+                    "anchor_id": aid,
+                    "rssi": val,
+                })
+            return
 
-    st.session_state.localized_positions.append(result)
-    st.session_state.last_position = result.position
-    st.session_state.last_method = method
+        position, localized, smoothed = run_localization(st.session_state, scans, method, use_kalman)
 
-    for aid, val in rssi.items():
-        st.session_state.rssi_history.append({
-            "timestamp": datetime.now().isoformat(),
-            "anchor_id": aid,
-            "rssi": val,
-        })
+        if method == "trilateration" and position is not None:
+            # Store as LocalizedPosition for backward compat
+            result = LocalizedPosition(
+                timestamp=position.timestamp,
+                position=np.array([position.x, position.y, 0.0]),
+                method="trilateration",
+                anchors_used=[s.bssid for s in scans],
+            )
+            if smoothed is not None:
+                result.position = np.array([smoothed.x, smoothed.y, 0.0])
+                st.session_state.position_trail_2d.append((smoothed.x, smoothed.y))
+            else:
+                st.session_state.position_trail_2d.append((position.x, position.y))
+
+            st.session_state.localized_positions.append(result)
+            st.session_state.last_position = result.position
+            st.session_state.last_method = method
+
+            rssi = rssi_dict_from_scans(scans)
+            for bssid, rssi_val in rssi.items():
+                st.session_state.rssi_history.append({
+                    "timestamp": datetime.now().isoformat(),
+                    "anchor_id": bssid,
+                    "rssi": rssi_val,
+                })
+
+        elif method == "fingerprinting" and localized is not None:
+            st.session_state.localized_positions.append(localized)
+            st.session_state.last_position = localized.position
+            st.session_state.last_method = method
+            st.session_state.position_trail_2d.append((localized.position[0], localized.position[1]))
+
+    else:
+        # Live mode
+        scans = collect_rssi(st.session_state)
+        if not scans:
+            st.warning("No scan data available. Check hardware connection.")
+            return
+
+        position, localized, smoothed = run_localization(st.session_state, scans, method, use_kalman)
+
+        if method == "trilateration" and position is not None:
+            result = LocalizedPosition(
+                timestamp=position.timestamp,
+                position=np.array([position.x, position.y, 0.0]),
+                method="trilateration",
+                anchors_used=[s.bssid for s in scans],
+            )
+            if smoothed is not None:
+                result.position = np.array([smoothed.x, smoothed.y, 0.0])
+                st.session_state.position_trail_2d.append((smoothed.x, smoothed.y))
+            else:
+                st.session_state.position_trail_2d.append((position.x, position.y))
+
+            st.session_state.localized_positions.append(result)
+            st.session_state.last_position = result.position
+            st.session_state.last_method = method
+
+            rssi = rssi_dict_from_scans(scans)
+            for bssid, rssi_val in rssi.items():
+                st.session_state.rssi_history.append({
+                    "timestamp": datetime.now().isoformat(),
+                    "anchor_id": bssid,
+                    "rssi": rssi_val,
+                })
+
+        elif method == "fingerprinting" and localized is not None:
+            st.session_state.localized_positions.append(localized)
+            st.session_state.last_position = localized.position
+            st.session_state.last_method = method
+            st.session_state.position_trail_2d.append((localized.position[0], localized.position[1]))
 
 
 def _run_path_simulation():
-    room = st.session_state.room_dimensions
+    """Run a simulated path of 20 localization estimates."""
     solver = st.session_state.trilateration_solver
     solver.n = path_loss_n
     anchors = st.session_state.anchors
+    room = st.session_state.room_dimensions
 
     center = np.array([room["length_x"] / 2, room["width_y"] / 2, 1.2])
     radius = min(room["length_x"], room["width_y"]) / 3
@@ -235,19 +335,59 @@ def _run_path_simulation():
             0.2 * np.sin(angle * 2),
         ])
 
-        rssi = generate_synthetic_rssi(anchors, true_pos, noise_std=noise_level, n=path_loss_n)
-        result = solver.localize(rssi)
+        scans = generate_synthetic_scans(
+            anchors, true_pos, st.session_state.rssi_pipeline,
+            noise_std=noise_level, n=path_loss_n,
+        )
 
-        if use_kalman:
-            result.position = st.session_state.kalman_filter.update(result.position)
+        if len(scans) < 3:
+            # Fallback to legacy API
+            rssi = generate_synthetic_rssi(anchors, true_pos, noise_std=noise_level, n=path_loss_n)
+            result = solver.localize(rssi)
+            if use_kalman:
+                result.position = st.session_state.kalman_filter.update(result.position)
+            st.session_state.localized_positions.append(result)
+            st.session_state.last_position = result.position
+            st.session_state.last_method = method
+            st.session_state.position_trail_2d.append((result.position[0], result.position[1]))
 
-        st.session_state.localized_positions.append(result)
-        st.session_state.last_position = result.position
-        st.session_state.last_method = method
+            for aid, val in rssi.items():
+                st.session_state.rssi_history.append({
+                    "timestamp": datetime.now().isoformat(),
+                    "anchor_id": aid,
+                    "rssi": val,
+                })
+            continue
 
-        for aid, val in rssi.items():
-            st.session_state.rssi_history.append({
-                "timestamp": datetime.now().isoformat(),
-                "anchor_id": aid,
-                "rssi": val,
-            })
+        position, localized, smoothed = run_localization(st.session_state, scans, method, use_kalman)
+
+        if method == "trilateration" and position is not None:
+            result = LocalizedPosition(
+                timestamp=position.timestamp,
+                position=np.array([position.x, position.y, 0.0]),
+                method="trilateration",
+                anchors_used=[s.bssid for s in scans],
+            )
+            if smoothed is not None:
+                result.position = np.array([smoothed.x, smoothed.y, 0.0])
+                st.session_state.position_trail_2d.append((smoothed.x, smoothed.y))
+            else:
+                st.session_state.position_trail_2d.append((position.x, position.y))
+
+            st.session_state.localized_positions.append(result)
+            st.session_state.last_position = result.position
+            st.session_state.last_method = method
+
+            rssi = rssi_dict_from_scans(scans)
+            for bssid, rssi_val in rssi.items():
+                st.session_state.rssi_history.append({
+                    "timestamp": datetime.now().isoformat(),
+                    "anchor_id": bssid,
+                    "rssi": rssi_val,
+                })
+
+        elif method == "fingerprinting" and localized is not None:
+            st.session_state.localized_positions.append(localized)
+            st.session_state.last_position = localized.position
+            st.session_state.last_method = method
+            st.session_state.position_trail_2d.append((localized.position[0], localized.position[1]))

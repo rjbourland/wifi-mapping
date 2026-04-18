@@ -18,8 +18,11 @@ from gui.utils.theme import inject_theme, status_badge, section_header
 from gui.utils.data_loader import (
     init_session_state,
     generate_synthetic_rssi,
+    generate_synthetic_csi,
     positions_to_dataframe,
 )
+from gui.utils.pipeline import generate_synthetic_scans, run_localization, rssi_dict_from_scans
+from src.utils.data_formats import LocalizedPosition
 
 st.set_page_config(
     page_title="WiFi Mapping",
@@ -214,12 +217,10 @@ with col_right:
 
 # --- Helper ---
 def _run_simulation():
-    """Run a simulated tracking session."""
-    import time
-
+    """Run a simulated tracking session using the real pipeline."""
     room = st.session_state.room_dimensions
-    solver = st.session_state.trilateration_solver
     anchors = st.session_state.anchors
+    pipeline = st.session_state.rssi_pipeline
 
     # Simulate a circular path through the room
     center = np.array([room["length_x"] / 2, room["width_y"] / 2, 1.2])
@@ -230,22 +231,58 @@ def _run_simulation():
         true_pos = center + np.array([
             radius * np.cos(angle),
             radius * np.sin(angle),
-            0.2 * np.sin(angle * 2),  # Slight vertical oscillation
+            0.2 * np.sin(angle * 2),
         ])
 
-        rssi = generate_synthetic_rssi(anchors, true_pos, noise_std=2.0)
-        result = solver.localize(rssi)
-        st.session_state.localized_positions.append(result)
-        st.session_state.last_position = result.position
-        st.session_state.last_method = result.method
+        # Use the real pipeline: synthetic scans → process → localize → kalman
+        scans = generate_synthetic_scans(anchors, true_pos, pipeline, noise_std=2.0)
 
-        # Add to RSSI history
-        for aid, rssi_val in rssi.items():
-            st.session_state.rssi_history.append({
-                "timestamp": datetime.now().isoformat(),
-                "anchor_id": aid,
-                "rssi": rssi_val,
-            })
+        if len(scans) >= 3:
+            position, localized, smoothed = run_localization(
+                st.session_state, scans, method="trilateration", use_kalman=True,
+            )
+
+            if position is not None:
+                if smoothed is not None:
+                    pos_3d = np.array([smoothed.x, smoothed.y, 0.0])
+                    st.session_state.position_trail_2d.append((smoothed.x, smoothed.y))
+                else:
+                    pos_3d = np.array([position.x, position.y, 0.0])
+                    st.session_state.position_trail_2d.append((position.x, position.y))
+
+                result = LocalizedPosition(
+                    timestamp=position.timestamp,
+                    position=pos_3d,
+                    method="trilateration",
+                    anchors_used=[s.bssid for s in scans],
+                )
+                st.session_state.localized_positions.append(result)
+                st.session_state.last_position = result.position
+                st.session_state.last_method = "trilateration"
+
+                rssi = rssi_dict_from_scans(scans)
+                for bssid, rssi_val in rssi.items():
+                    st.session_state.rssi_history.append({
+                        "timestamp": datetime.now().isoformat(),
+                        "anchor_id": bssid,
+                        "rssi": rssi_val,
+                    })
+        else:
+            # Fallback to legacy API if pipeline doesn't produce enough scans
+            rssi = generate_synthetic_rssi(anchors, true_pos, noise_std=2.0)
+            result = st.session_state.trilateration_solver.localize(rssi)
+            result.position = st.session_state.kalman_filter.update(result.position)
+            st.session_state.localized_positions.append(result)
+            st.session_state.last_position = result.position
+            st.session_state.last_method = result.method
+            st.session_state.position_trail_2d.append((result.position[0], result.position[1]))
+
+            for aid, rssi_val in rssi.items():
+                st.session_state.rssi_history.append({
+                    "timestamp": datetime.now().isoformat(),
+                    "anchor_id": aid,
+                    "rssi": rssi_val,
+                })
 
         # Check motion
         csi = generate_synthetic_csi(50, motion=(i % 3 == 0))

@@ -13,6 +13,7 @@ import numpy as np
 
 from gui.utils.theme import inject_theme, section_header
 from gui.utils.data_loader import init_session_state
+from src.utils.data_formats import AnchorPosition
 
 st.set_page_config(page_title="Settings", page_icon="⚙", layout="wide")
 inject_theme()
@@ -42,26 +43,37 @@ with col_r2:
 with col_r3:
     new_rz = st.number_input("Height Z (m)", 1.0, 5.0, float(room["height_z"]), 0.1, key="set_rz")
 
-# Anchor positions
+# Anchor positions (now editable)
 st.markdown("**Anchor Positions**")
+updated_anchors = []
 for i, anchor in enumerate(anchors):
     with st.expander(f"{anchor.anchor_id} — {anchor.height} ({anchor.hardware})", expanded=False):
         col_a1, col_a2, col_a3 = st.columns(3)
         with col_a1:
-            st.number_input(
+            ax = st.number_input(
                 "X", 0.0, 20.0, float(anchor.position[0]), 0.1,
-                key=f"anchor_x_{i}", disabled=True,
+                key=f"anchor_x_{i}",
             )
         with col_a2:
-            st.number_input(
+            ay = st.number_input(
                 "Y", 0.0, 20.0, float(anchor.position[1]), 0.1,
-                key=f"anchor_y_{i}", disabled=True,
+                key=f"anchor_y_{i}",
             )
         with col_a3:
-            st.number_input(
+            az = st.number_input(
                 "Z", 0.0, 5.0, float(anchor.position[2]), 0.1,
-                key=f"anchor_z_{i}", disabled=True,
+                key=f"anchor_z_{i}",
             )
+        # Store updated anchor
+        updated_anchors.append(AnchorPosition(
+            anchor_id=anchor.anchor_id,
+            position=np.array([ax, ay, az]),
+            height=anchor.height,
+            hardware=anchor.hardware,
+            ip=anchor.ip,
+            channel=anchor.channel,
+            bandwidth=anchor.bandwidth,
+        ))
         st.markdown(
             f'<span style="color:#888; font-family:Fira Code,Consolas,monospace; font-size:0.8rem;">'
             f"Hardware: {anchor.hardware} | Channel: {anchor.channel} | "
@@ -69,21 +81,40 @@ for i, anchor in enumerate(anchors):
             unsafe_allow_html=True,
         )
 
-if st.button("💾 Save Anchor Config", use_container_width=True):
-    config_path = Path(PROJECT_ROOT) / "configs" / "anchors.yaml"
-    try:
-        with open(config_path) as f:
-            config = yaml.safe_load(f)
+col_btn_anchor1, col_btn_anchor2 = st.columns(2)
+with col_btn_anchor1:
+    if st.button("💾 Save Anchor Config", use_container_width=True):
+        config_path = Path(PROJECT_ROOT) / "configs" / "anchors.yaml"
+        try:
+            with open(config_path) as f:
+                config = yaml.safe_load(f)
 
-        config["room"]["length_x"] = new_rx
-        config["room"]["width_y"] = new_ry
-        config["room"]["height_z"] = new_rz
+            config["room"]["length_x"] = new_rx
+            config["room"]["width_y"] = new_ry
+            config["room"]["height_z"] = new_rz
 
-        with open(config_path, "w") as f:
-            yaml.dump(config, f, default_flow_style=False)
-        st.toast("Anchor configuration saved!")
-    except Exception as e:
-        st.error(f"Failed to save config: {e}")
+            for anchor in updated_anchors:
+                aid = anchor.anchor_id
+                if aid in config.get("anchors", {}):
+                    config["anchors"][aid]["position"] = anchor.position.tolist()
+
+            with open(config_path, "w") as f:
+                yaml.dump(config, f, default_flow_style=False)
+            st.toast("Anchor configuration saved!")
+        except Exception as e:
+            st.error(f"Failed to save config: {e}")
+
+with col_btn_anchor2:
+    if st.button("⚡ Apply to Session", use_container_width=True):
+        # Update session state with new anchor positions
+        st.session_state.anchors = updated_anchors
+        st.session_state.room_dimensions = {
+            "length_x": new_rx,
+            "width_y": new_ry,
+            "height_z": new_rz,
+        }
+        st.session_state.trilateration_solver.set_anchors(updated_anchors)
+        st.toast("Applied anchor positions to live session!")
 
 # --- Algorithm Parameters ---
 section_header("Algorithm Parameters", "🎛")
@@ -140,19 +171,19 @@ with col_fp3:
                  index=["rssi", "csi_amplitude", "csi_phase", "combined"].index(fp_config.get("feature_type", "rssi")),
                  key="set_fp_feature")
 
-# MUSIC
-st.markdown("**MUSIC AoA Estimation**")
-music_config = algo_config.get("music", {})
-col_mu1, col_mu2, col_mu3 = st.columns(3)
-with col_mu1:
-    st.number_input("Antennas", 1, 8,
-                    int(music_config.get("num_antennas", 2)), 1, key="set_mu_ant")
-with col_mu2:
-    st.number_input("Paths to Resolve", 1, 10,
-                    int(music_config.get("num_paths", 4)), 1, key="set_mu_paths")
-with col_mu3:
-    st.number_input("Angle Resolution (°)", 0.1, 5.0,
-                    float(music_config.get("angle_resolution", 1.0)), 0.1, key="set_mu_res")
+# Kalman
+st.markdown("**Kalman Filter**")
+kalman_config = algo_config.get("kalman", {})
+col_k1, col_k2, col_k3 = st.columns(3)
+with col_k1:
+    st.number_input("Process Noise", 0.001, 10.0,
+                    float(kalman_config.get("process_noise", 0.1)), 0.01, key="set_kalman_pn")
+with col_k2:
+    st.number_input("Measurement Noise", 0.1, 50.0,
+                    float(kalman_config.get("measurement_noise", 1.0)), 0.1, key="set_kalman_mn")
+with col_k3:
+    st.number_input("Initial Uncertainty", 0.1, 100.0,
+                    float(kalman_config.get("initial_uncertainty", 10.0)), 1.0, key="set_kalman_iu")
 
 # Motion detection
 st.markdown("**Motion Detection**")
@@ -165,22 +196,44 @@ with col_mo2:
     st.number_input("Window Size (samples)", 5, 100,
                     int(mot_config.get("window_size", 20)), 5, key="set_mo_window")
 
-if st.button("💾 Save Algorithm Config", use_container_width=True):
-    config_path = Path(PROJECT_ROOT) / "configs" / "algorithm.yaml"
-    try:
-        with open(config_path) as f:
-            config = yaml.safe_load(f)
+col_btn_algo1, col_btn_algo2 = st.columns(2)
+with col_btn_algo1:
+    if st.button("💾 Save Algorithm Config", use_container_width=True):
+        config_path = Path(PROJECT_ROOT) / "configs" / "algorithm.yaml"
+        try:
+            with open(config_path) as f:
+                config = yaml.safe_load(f)
 
-        config["path_loss"]["rssi_d0"] = st.session_state.get("set_rssi_d0", -30.0)
-        config["path_loss"]["n"] = st.session_state.get("set_pl_n", 3.0)
-        config["path_loss"]["d0"] = st.session_state.get("set_pl_d0", 1.0)
-        config["path_loss"]["sigma"] = st.session_state.get("set_pl_sigma", 4.0)
+            config["path_loss"]["rssi_d0"] = st.session_state.get("set_rssi_d0", -30.0)
+            config["path_loss"]["n"] = st.session_state.get("set_pl_n", 3.0)
+            config["path_loss"]["d0"] = st.session_state.get("set_pl_d0", 1.0)
+            config["path_loss"]["sigma"] = st.session_state.get("set_pl_sigma", 4.0)
 
-        with open(config_path, "w") as f:
-            yaml.dump(config, f, default_flow_style=False)
-        st.toast("Algorithm configuration saved!")
-    except Exception as e:
-        st.error(f"Failed to save config: {e}")
+            with open(config_path, "w") as f:
+                yaml.dump(config, f, default_flow_style=False)
+            st.toast("Algorithm configuration saved!")
+        except Exception as e:
+            st.error(f"Failed to save config: {e}")
+
+with col_btn_algo2:
+    if st.button("⚡ Apply Algorithm Params to Session", use_container_width=True):
+        # Propagate settings to live objects
+        solver = st.session_state.trilateration_solver
+        solver.n = st.session_state.get("set_pl_n", 3.0)
+        solver.rssi_d0 = st.session_state.get("set_rssi_d0", -30.0)
+
+        kalman = st.session_state.kalman_filter
+        kalman.process_noise = st.session_state.get("set_kalman_pn", 0.1)
+        kalman.measurement_noise = st.session_state.get("set_kalman_mn", 1.0)
+
+        fp = st.session_state.fingerprinting
+        fp.k = st.session_state.get("set_fp_k", 5)
+
+        md = st.session_state.motion_detector
+        md.variance_threshold = st.session_state.get("set_mo_thresh", 0.5)
+        md.window_size = st.session_state.get("set_mo_window", 20)
+
+        st.toast("Algorithm parameters applied to live session!")
 
 # --- Hardware Configuration ---
 section_header("Hardware Configuration", "🔌")
