@@ -165,7 +165,21 @@ section_header("Gait Analysis", "🚶")
 
 gait_csi = generate_synthetic_csi(200, motion=True)
 gait_classifier = st.session_state.gait_classifier
-gait_result = gait_classifier.extract_gait_features(gait_csi, sample_rate=50.0)
+gait_result = gait_classifier.classify(gait_csi, sample_rate=50.0)
+
+# Gait type badge
+gait_type = gait_result["gait_type"]
+gait_conf = gait_result["confidence"]
+gait_colors = {"walking": "#00d4ff", "running": "#ff8800", "stationary": "#888888"}
+badge_color = gait_colors.get(gait_type, "#00ff88")
+st.markdown(
+    f'<div style="background:#1a1a2e; border:1px solid {badge_color}40; border-radius:8px; padding:12px; '
+    f'font-family:Fira Code,Consolas,monospace;">'
+    f'<span style="color:{badge_color}; font-size:1.3rem; font-weight:bold;">'
+    f'{gait_type.upper()}</span> '
+    f'<span style="color:#888; font-size:0.85rem;">(confidence: {gait_conf:.1%})</span></div>',
+    unsafe_allow_html=True,
+)
 
 col_g1, col_g2, col_g3, col_g4 = st.columns(4)
 with col_g1:

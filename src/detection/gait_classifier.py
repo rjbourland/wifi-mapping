@@ -31,7 +31,92 @@ class GaitClassifier:
         if config is None:
             config = load_config("algorithm")
 
-        self._templates: dict[str, np.ndarray] = {}
+        self._templates: dict[str, dict] = {}
+        self._init_default_templates()
+
+    def _init_default_templates(self):
+        """Create default gait templates from synthetic signatures."""
+        # Walking: ~1.8 Hz step frequency, moderate doppler variance
+        self._templates["walking"] = {
+            "step_frequency_hz": 1.8,
+            "doppler_variance": 0.15,
+        }
+        # Running: ~2.8 Hz step frequency, high doppler variance
+        self._templates["running"] = {
+            "step_frequency_hz": 2.8,
+            "doppler_variance": 0.6,
+        }
+        # Stationary: near-zero frequency, very low variance
+        self._templates["stationary"] = {
+            "step_frequency_hz": 0.1,
+            "doppler_variance": 0.01,
+        }
+
+    def add_template(
+        self, label: str, csi_packets: np.ndarray, sample_rate: float = 50.0
+    ):
+        """Record a gait template from CSI data.
+
+        Args:
+            label: Template name (e.g. 'walking', 'running').
+            csi_packets: Complex CSI packets, shape (N, antennas, subcarriers).
+            sample_rate: CSI sampling rate in Hz.
+        """
+        features = self.extract_gait_features(csi_packets, sample_rate)
+        self._templates[label] = {
+            "step_frequency_hz": features["step_frequency_hz"],
+            "doppler_variance": features["doppler_variance"],
+        }
+
+    def classify(
+        self, csi_packets: np.ndarray, sample_rate: float = 50.0
+    ) -> dict:
+        """Classify gait pattern from CSI data.
+
+        Compares extracted features against stored templates using
+        weighted distance in (step_frequency, doppler_variance) space.
+
+        Args:
+            csi_packets: Complex CSI packets, shape (N, antennas, subcarriers).
+            sample_rate: CSI sampling rate in Hz.
+
+        Returns:
+            Dict with:
+            - 'gait_type': Best-matching template label.
+            - 'confidence': Match confidence (0-1).
+            - 'step_frequency_hz', 'step_frequency_bpm', 'doppler_variance',
+              'gait_period_s': Raw feature values.
+        """
+        features = self.extract_gait_features(csi_packets, sample_rate)
+
+        if not self._templates:
+            return {
+                "gait_type": "unknown",
+                "confidence": 0.0,
+                **features,
+            }
+
+        best_label = "unknown"
+        best_score = float("inf")
+
+        for label, template in self._templates.items():
+            # Weighted distance: frequency matters more than variance
+            freq_diff = abs(features["step_frequency_hz"] - template["step_frequency_hz"])
+            var_diff = abs(features["doppler_variance"] - template["doppler_variance"])
+            # Normalize: freq range ~0-3 Hz, variance range ~0-1
+            distance = 2.0 * freq_diff / 3.0 + var_diff
+            if distance < best_score:
+                best_score = distance
+                best_label = label
+
+        # Confidence: 1 at zero distance, decaying with distance
+        confidence = 1.0 / (1.0 + 5.0 * best_score)
+
+        return {
+            "gait_type": best_label,
+            "confidence": min(confidence, 1.0),
+            **features,
+        }
 
     def extract_gait_features(
         self, csi_packets: np.ndarray, sample_rate: float = 50.0
