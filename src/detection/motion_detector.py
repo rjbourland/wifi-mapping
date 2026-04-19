@@ -64,7 +64,7 @@ class MotionDetector:
             and all(self._motion_buffer[-min_windows:])
         )
 
-        self._is_motion = sustained_motion or is_motion
+        self._is_motion = sustained_motion
 
         return {
             "is_motion": self._is_motion,
